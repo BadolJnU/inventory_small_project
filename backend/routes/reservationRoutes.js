@@ -3,6 +3,7 @@ const router = express.Router();
 const { sequelize } = require('../config/db');
 const Drop = require('../models/Drop');
 const Reservation = require('../models/Reservation');
+const Purchase = require('../models/Purchase');
 
 router.post('/reserve/:dropId', async (req, res) => {
   const { dropId } = req.params;
@@ -69,5 +70,69 @@ async function expireReservation(resId, dropId, io) {
     console.log(`Reservation ${resId} expired. Stock returned.`);
   }
 }
+
+
+router.post('/purchase/:reservationId', async (req, res) => {
+  const { reservationId } = req.params;
+  const t = await sequelize.transaction();
+
+  try {
+    // 1. Find the active reservation
+    const reservation = await Reservation.findByPk(reservationId, { transaction: t });
+
+    if (!reservation || reservation.status !== 'active') {
+      await t.rollback();
+      return res.status(400).json({ message: 'Reservation expired or invalid.' });
+    }
+
+    // 2. Mark reservation as completed
+    reservation.status = 'completed';
+    await reservation.save({ transaction: t });
+
+    // 3. Create a Purchase record (This feeds the "Activity Feed")
+    await Purchase.create({
+      DropId: reservation.DropId,
+      // In a real app, you'd get the UserId from the auth session
+      status: 'success'
+    }, { transaction: t });
+
+    await t.commit();
+
+    // 4. Notify everyone of the final sale
+    req.app.get('socketio').emit('new_purchase', {
+      dropId: reservation.DropId,
+      message: "A new pair of sneakers was just purchased!"
+    });
+
+    res.status(200).json({ message: 'Purchase successful!' });
+
+  } catch (error) {
+    await t.rollback();
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+router.get('/drops', async (req, res) => {
+    try {
+      const drops = await Drop.findAll({
+        include: [
+          {
+            model: Purchase,
+            limit: 3,
+            order: [['createdAt', 'DESC']],
+            include: [{ model: User, attributes: ['username'] }] // Only get username for privacy/security
+          }
+        ],
+        order: [['id', 'ASC']] // Keep the list order consistent
+      });
+      
+      res.status(200).json(drops);
+    } catch (error) {
+      console.error("Error fetching drops:", error);
+      res.status(500).json({ error: "Internal Server Error" });
+    }
+});
+
 
 module.exports = router;
