@@ -88,10 +88,10 @@ const InventoryDashboard = () => {
   }, [timeLeft, reservation]);
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6 md:p-12">
+    <div className="min-h-screen bg-black-500 p-6 md:p-12">
       <header className="max-w-6xl mx-auto mb-12 flex justify-between items-end">
         <div>
-          <h1 className="text-4xl font-black text-gray-900 tracking-tight">SNEAKER DROPS</h1>
+          <h1 className="text-4xl font-black text-red-900 tracking-tight">SNEAKER DROPS</h1>
           <p className="text-gray-500 font-medium">Real-time Inventory & High-Concurrency Sales</p>
         </div>
         <div className="text-right">
