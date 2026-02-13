@@ -9,15 +9,18 @@ const app = express();
 const server = http.createServer(app); 
 
 // Frontend URL - Ensure this matches your Vite port (usually 5173 or 5174)
-const allowedOrigin = 'http://localhost:5173'; 
+const allowedOrigin = ['http://localhost:5173','https://inventory-small-project.vercel.app/']; 
 
 app.use(cors({
-  origin: allowedOrigin,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true
 }));
-
-app.use(express.json());
 
 // Initialize Socket.io
 const io = new Server(server, {
@@ -61,6 +64,10 @@ app.set('socketio', io);
 // ==========================================
 // ROUTES
 // ==========================================
+
+app.get('/', (req, res) => {
+  res.status(200).json({ message: "Inventory Backend is Live!", status: "Connected" });
+});
 app.use('/api', reservationRoutes); // Handles /api/items, /api/reserve, /api/purchase-confirm
 app.use('/api/auth', authRoutes);   // Handles /api/auth/login, /api/auth/register
 
