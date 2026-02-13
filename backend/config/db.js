@@ -1,5 +1,5 @@
 const { Sequelize } = require('sequelize');
-const pg = require('pg'); // 1. Import pg directly
+const pg = require('pg'); // <--- ADD THIS LINE
 require('dotenv').config();
 
 const sequelize = new Sequelize(
@@ -9,13 +9,13 @@ const sequelize = new Sequelize(
   {
     host: process.env.DB_HOST,
     dialect: 'postgres',
-    dialectModule: pg, // 2. Tell Sequelize to use the pg package you installed
+    dialectModule: pg, // <--- ADD THIS LINE (This is the "magic" fix for Vercel)
     logging: false,
     dialectOptions: {
       ssl: {
-        require: true, 
-        rejectUnauthorized: false // 3. Required for Neon connection
-      }
+        require: true,
+        rejectUnauthorized: false, // Required for Neon
+      },
     },
     pool: {
       max: 5,
@@ -32,7 +32,7 @@ const connectDB = async () => {
     console.log('PostgreSQL Connected Successfully.');
   } catch (error) {
     console.error('Unable to connect to the database:', error);
-    // On Vercel, don't use process.exit(1) as it kills the serverless function
+    // Removed process.exit(1) so the Vercel function doesn't hard-crash
   }
 };
 
