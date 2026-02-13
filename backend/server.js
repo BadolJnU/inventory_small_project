@@ -8,7 +8,7 @@ const { connectDB, sequelize } = require('./config/db');
 const app = express();
 const server = http.createServer(app); 
 
-// UPDATED: Origin set to 5174 to match your Vite port
+// Frontend URL - Ensure this matches your Vite port (usually 5173 or 5174)
 const allowedOrigin = 'http://localhost:5173'; 
 
 app.use(cors({
@@ -19,6 +19,7 @@ app.use(cors({
 
 app.use(express.json());
 
+// Initialize Socket.io
 const io = new Server(server, {
   cors: {
     origin: allowedOrigin,
@@ -26,40 +27,57 @@ const io = new Server(server, {
   }
 });
 
-// Import Routes & Models
+// Import Routes
 const reservationRoutes = require('./routes/reservationRoutes');
-const authRoutes = require('./routes/authRoutes'); // Imported here
+const authRoutes = require('./routes/authRoutes');
+
+// Import Models
 const Drop = require('./models/Drop');
 const Reservation = require('./models/Reservation');
 const Purchase = require('./models/Purchase');
 const User = require('./models/User');
 
-// Setup Associations
+// ==========================================
+// SETUP ASSOCIATIONS (CRITICAL FOR ADMIN DATA)
+// ==========================================
+
+// Link User to Purchase 
+// Using 'UserId' to match your reservationRoutes.js logic
+User.hasMany(Purchase, { foreignKey: 'UserId' });
+Purchase.belongsTo(User, { foreignKey: 'UserId' });
+
+// Link Drop (Item) to Purchase
+// Using 'DropId' to match your reservationRoutes.js logic
+Drop.hasMany(Purchase, { foreignKey: 'DropId' });
+Purchase.belongsTo(Drop, { foreignKey: 'DropId' });
+
+// Legacy Reservation Associations (if still in use)
 Drop.hasMany(Reservation);
 Reservation.belongsTo(Drop);
-Drop.hasMany(Purchase);
-Purchase.belongsTo(Drop);
-User.hasMany(Purchase);
-Purchase.belongsTo(User);
 
+// Pass socket.io to routes
 app.set('socketio', io);
 
-// Routes
-app.use('/api', reservationRoutes);
-app.use('/api/auth', authRoutes); // Auth routes now correctly mapped
+// ==========================================
+// ROUTES
+// ==========================================
+app.use('/api', reservationRoutes); // Handles /api/items, /api/reserve, /api/purchase-confirm
+app.use('/api/auth', authRoutes);   // Handles /api/auth/login, /api/auth/register
 
-// Database Sync & Seed
+// ==========================================
+// DATABASE SYNC
+// ==========================================
 connectDB();
-// Change force to true ONLY ONCE if you want to wipe the "automatic" users
-sequelize.sync({ force: true }).then(async () => {
-    const dropCount = await Drop.count();
-    if (dropCount === 0) {
-      await Drop.create({ name: "Air Jordan 2 High", price: 270, availableStock: 20 });
-      console.log("✅ Seed data (Drops) created! NO USERS CREATED.");
-    }
-});
 
-
+// NOTE: Use { force: true } ONCE if you need to reset the table columns 
+// to match the new UserId/DropId capitalization. Change back to { alter: true } after.
+sequelize.sync({ alter: true }) 
+  .then(() => {
+    console.log('✅ Database synced successfully');
+  })
+  .catch(err => {
+    console.error('❌ Database sync failed:', err);
+  });
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {

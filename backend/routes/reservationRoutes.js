@@ -1,88 +1,110 @@
 const express = require('express');
 const router = express.Router();
 const { sequelize } = require('../config/db');
+const { isAdmin } = require('../middleware/authMiddleware');
 
 // Import models
 const Drop = require('../models/Drop');
-const Reservation = require('../models/Reservation');
 const Purchase = require('../models/Purchase');
 const User = require('../models/User');
 
 /**
- * @route   GET /api/drops
- * @desc    Fetch all drops with the 3 most recent purchasers for the feed
+ * @route   GET /api/items
+ * @desc    Fetch all available items for the shop
  */
-router.get('/drops', async (req, res) => {
+router.get('/items', async (req, res) => {
   try {
-    const drops = await Drop.findAll({
-      include: [
-        {
-          model: Purchase,
-          limit: 3,
-          order: [['createdAt', 'DESC']],
-          include: [{ model: User, attributes: ['username'] }]
-        }
-      ],
+    const items = await Drop.findAll({
       order: [['id', 'ASC']]
     });
-    res.status(200).json(drops);
+    res.status(200).json(items);
   } catch (error) {
-    console.error("Error fetching drops:", error);
-    res.status(500).json({ error: "Internal Server Error" });
+    console.error("FETCH ITEMS ERROR:", error);
+    res.status(500).json({ error: "Failed to fetch items" });
   }
 });
 
 /**
- * @route   POST /api/reserve/:dropId
- * @desc    Atomic reservation with row locking and 60s auto-expiry
+ * @route   GET /api/admin/data
+ * @desc    Fetch Users, Items, and Purchase History for Admin Panel
  */
-router.post('/reserve/:dropId', async (req, res) => {
-  const { dropId } = req.params;
-  const t = await sequelize.transaction();
-
+router.get('/admin/data', async (req, res) => {
   try {
-    // 1. SELECT FOR UPDATE (Locks the row in Postgres)
-    const drop = await Drop.findByPk(dropId, {
-      transaction: t,
-      lock: t.LOCK.UPDATE 
+    const history = await Purchase.findAll({
+      include: [
+        {
+          model: User,
+          attributes: ['username']
+        },
+        {
+          model: Drop,
+          attributes: ['name']
+        }
+      ],
+      order: [['createdAt', 'DESC']]
     });
 
-    if (!drop || drop.availableStock <= 0) {
-      await t.rollback();
-      return res.status(400).json({ message: 'Item out of stock!' });
+    const items = await Drop.findAll();
+    const users = await User.findAll();
+
+    res.json({ users, items, history });
+  } catch (error) {
+    console.error("ADMIN DATA CRASH:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * @route   POST /api/reserve
+ * @desc    User: Reserve specific quantity (60s lock)
+ */
+router.post('/reserve', async (req, res) => {
+  const { itemId, userId, quantity } = req.body;
+  let t;
+
+  try {
+    t = await sequelize.transaction();
+    const item = await Drop.findByPk(itemId, { transaction: t, lock: t.LOCK.UPDATE });
+
+    if (!item || item.availableStock < quantity) {
+      if (t) await t.rollback();
+      return res.status(400).json({ error: "Insufficient stock" });
     }
 
-    // 2. Atomic decrement
-    drop.availableStock -= 1;
-    await drop.save({ transaction: t });
+    item.availableStock -= quantity;
+    await item.save({ transaction: t });
 
-    // 3. Create reservation record
-    const expiresAt = new Date(Date.now() + 60000);
-    const reservation = await Reservation.create({
-      DropId: dropId,
-      expiresAt: expiresAt,
-      status: 'active'
+    const purchase = await Purchase.create({ 
+      UserId: userId, 
+      DropId: itemId, 
+      quantity, 
+      status: 'pending' 
     }, { transaction: t });
 
     await t.commit();
+    t = null; 
 
-    // 4. Real-time broadcast: New Stock Level
     const io = req.app.get('socketio');
-    io.emit('stock_updated', {
-      dropId: drop.id,
-      availableStock: drop.availableStock
-    });
+    if (io) io.emit('stock_updated', { itemId: item.id, newStock: item.availableStock });
 
-    // 5. Start Recovery Timer
     setTimeout(async () => {
-      await expireReservation(reservation.id, dropId, io);
+      try {
+        const checkPurchase = await Purchase.findByPk(purchase.id);
+        if (checkPurchase && checkPurchase.status === 'pending') {
+          const revertItem = await Drop.findByPk(itemId);
+          revertItem.availableStock += quantity; 
+          await revertItem.save();
+          await checkPurchase.destroy(); 
+
+          if (io) io.emit('stock_updated', { itemId: itemId, newStock: revertItem.availableStock });
+          console.log(`Timer Expired: Stock for item ${itemId} returned.`);
+        }
+      } catch (err) {
+        console.error("Timeout Release Error:", err);
+      }
     }, 60000);
 
-    res.status(200).json({ 
-      message: 'Reserved!', 
-      reservationId: reservation.id,
-      expiresAt 
-    });
+    res.json({ message: "Reserved for 60s", purchaseId: purchase.id });
 
   } catch (error) {
     if (t) await t.rollback();
@@ -91,79 +113,63 @@ router.post('/reserve/:dropId', async (req, res) => {
 });
 
 /**
- * @route   POST /api/purchase/:reservationId
- * @desc    Finalize purchase and stop the recovery flow
+ * @route   POST /api/purchase-confirm
+ * @desc    User: Finalize the purchase
  */
-router.post('/purchase/:reservationId', async (req, res) => {
-  const { reservationId } = req.params;
-  const t = await sequelize.transaction();
-
+router.post('/purchase-confirm', async (req, res) => {
   try {
-    const reservation = await Reservation.findByPk(reservationId, { transaction: t });
+    const itemId = Number(req.body.itemId);
+    const userId = Number(req.body.userId);
 
-    if (!reservation || reservation.status !== 'active') {
-      await t.rollback();
-      return res.status(400).json({ message: 'Reservation invalid or expired.' });
-    }
+    // 1. Let's see ALL pending purchases in the terminal
+    const allPending = await Purchase.findAll({ where: { status: 'pending' } });
+    console.log("--- DATABASE DEBUG ---");
+    console.log("Looking for Item:", itemId, "User:", userId);
+    console.log("Current Pending Records in DB:", JSON.stringify(allPending, null, 2));
 
-    // Mark as completed so expireReservation() won't return stock
-    reservation.status = 'completed';
-    await reservation.save({ transaction: t });
-
-    // Create purchase record (Associate with dummy user for demo)
-    const user = await User.findOne(); // Get the seed user
-    await Purchase.create({
-      DropId: reservation.DropId,
-      UserId: user ? user.id : null,
-      status: 'success'
-    }, { transaction: t });
-
-    await t.commit();
-
-    // Broadcast purchase event for the Activity Feed
-    req.app.get('socketio').emit('new_purchase', {
-      dropId: reservation.DropId,
-      username: user ? user.username : 'Anonymous'
-    });
-
-    res.status(200).json({ message: 'Purchase successful!' });
-
-  } catch (error) {
-    if (t) await t.rollback();
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * Helper: Stock Recovery Logic
- * This returns stock to the pool if the user doesn't buy in time.
- */
-async function expireReservation(resId, dropId, io) {
-  try {
-    const res = await Reservation.findByPk(resId);
-    
-    // Check if the reservation is still 'active'
-    if (res && res.status === 'active') {
-      res.status = 'expired';
-      await res.save();
-
-      const drop = await Drop.findByPk(dropId);
-      if (drop) {
-        drop.availableStock += 1;
-        await drop.save();
-
-        // CRITICAL: Emit the update so frontend sees the stock go back up
-        io.emit('stock_updated', { 
-          dropId: drop.id, 
-          availableStock: drop.availableStock 
-        });
-
-        console.log(`[RECOVERY] Stock returned for Drop ${dropId}. Current: ${drop.availableStock}`);
+    // 2. Try the search
+    const reservation = await Purchase.findOne({
+      where: {
+        DropId: itemId,   
+        UserId: userId,   
+        status: 'pending'
       }
+    });
+
+    if (!reservation) {
+      return res.status(404).json({ 
+        error: "Reservation not found",
+        debug: "Check your backend terminal to see actual column names" 
+      });
     }
+
+    reservation.status = 'completed';
+    await reservation.save();
+    res.json({ message: "Success" });
   } catch (err) {
-    console.error("Recovery failed:", err);
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
   }
-}
+});
+
+/**
+ * @route   GET /api/my-orders/:userId
+ * @desc    Fetch successful purchases for a specific user
+ */
+router.get('/my-orders/:userId', async (req, res) => {
+  try {
+    const orders = await Purchase.findAll({
+      where: {
+        UserId: req.params.userId,
+        status: 'completed'
+      },
+      include: [{ model: Drop, attributes: ['name', 'price'] }],
+      order: [['updatedAt', 'DESC']]
+    });
+    res.json(orders);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch your orders" });
+  }
+});
 
 module.exports = router;
